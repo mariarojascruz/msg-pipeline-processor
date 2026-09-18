@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.msgpipeline.processor.domain.model.Message;
 import com.msgpipeline.processor.domain.port.out.EventPublisherPort;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
@@ -62,20 +63,25 @@ import java.util.Map;
 public class EventBridgeAdapter implements EventPublisherPort {
 
     // EventBridgeClient: thread-safe, reutilizable entre invocaciones warm
-    private static final EventBridgeClient eventBridgeClient;
+    // (bean singleton de Spring — el contexto ya se cachea en el cold start del handler)
     private static final ObjectMapper objectMapper = new ObjectMapper();
+    private EventBridgeClient eventBridgeClient;
 
-    static {
-        // Inicialización estática: se ejecuta UNA VEZ en el cold start
+    @Value("${app.aws.event-bus-name:msg-pipeline-events-sesion-05}")
+    private String eventBusName;
+
+    @Value("${app.aws.region:us-east-1}")
+    private String region;
+
+    @PostConstruct
+    void init() {
+        // Se ejecuta una vez que Spring inyectó @Value (no se puede hacer en un bloque static)
         eventBridgeClient = EventBridgeClient.builder()
-                .region(Region.US_EAST_1)
+                .region(Region.of(region))
                 .build();
         // Las credenciales las toma del IAM Role del Lambda automáticamente
         // (no hardcodeamos access keys — NUNCA se deben hardcodear)
     }
-
-    @Value("${app.aws.event-bus-name:msg-pipeline-events-sesion-05}")
-    private String eventBusName;
 
     /**
      * Publica el evento "MessageReceived" en EventBridge.
