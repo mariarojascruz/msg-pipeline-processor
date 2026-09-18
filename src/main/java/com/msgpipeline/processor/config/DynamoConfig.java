@@ -42,6 +42,9 @@ public class DynamoConfig {
     @Value("${app.aws.dynamodb-table:msg-pipeline-messages}")
     private String dynamodbTable;
 
+    @Value("${app.aws.region:us-east-1}")
+    private String region;
+
     /**
      * Cliente DynamoDB SDK v2.
      *
@@ -54,9 +57,9 @@ public class DynamoConfig {
      */
     @Bean
     public DynamoDbClient dynamoDbClient() {
-        log.info("Inicializando DynamoDbClient [region=us-east-1] [tabla={}]", dynamodbTable);
+        log.info("Inicializando DynamoDbClient [region={}] [tabla={}]", region, dynamodbTable);
         return DynamoDbClient.builder()
-                .region(Region.US_EAST_1)
+                .region(Region.of(region))
                 // Credenciales: IAM Role del Lambda (automático)
                 // No especificamos credenciales explícitas → AWS SDK las toma del rol
                 .build();
