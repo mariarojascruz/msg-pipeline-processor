@@ -2,6 +2,7 @@ package com.msgpipeline.processor.adapter.out.notification;
 
 import com.msgpipeline.processor.domain.model.Message;
 import com.msgpipeline.processor.domain.port.out.NotificationPort;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
@@ -21,16 +22,22 @@ import software.amazon.awssdk.services.sns.model.PublishResponse;
 @Profile("aws")
 public class SnsNotificationAdapter implements NotificationPort {
 
-    private static final SnsClient snsClient;
-
-    static {
-        snsClient = SnsClient.builder()
-                .region(Region.US_EAST_1)
-                .build();
-    }
+    private SnsClient snsClient;
 
     @Value("${app.aws.sns-topic-arn:}")
     private String snsTopicArn;
+
+    @Value("${app.aws.region:us-east-1}")
+    private String region;
+
+    @PostConstruct
+    void init() {
+        // Se construye aquí (no en un bloque static) para poder usar la región
+        // configurada via @Value, que aún no está inyectada durante la carga de la clase
+        snsClient = SnsClient.builder()
+                .region(Region.of(region))
+                .build();
+    }
 
     @Override
     public void notificar(Message message) {
