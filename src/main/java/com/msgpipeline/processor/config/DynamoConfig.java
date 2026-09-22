@@ -17,11 +17,14 @@ public class DynamoConfig {
     @Value("${app.aws.dynamodb-table:msg-pipeline-messages}")
     private String dynamodbTable;
 
+    @Value("${app.aws.region:us-east-1}")
+    private String region;
+
     @Bean
     public DynamoDbClient dynamoDbClient() {
-        log.info("Inicializando DynamoDbClient [tabla={}]", dynamodbTable);
+        log.info("Inicializando DynamoDbClient [region={}] [tabla={}]", region, dynamodbTable);
         return DynamoDbClient.builder()
-                .region(Region.US_EAST_1)
+                .region(Region.of(region))
                 .build();
     }
 
