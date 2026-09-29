@@ -1,0 +1,198 @@
+# =============================================================================
+# deploy.yml — GitHub Actions CI/CD Pipeline
+# =============================================================================
+# SESIÓN 08: SAM + S3 + GitHub Actions
+# PROYECTO: msg-pipeline-processor-sesion-08
+#
+# FIX: Se añade Paso 5 "Crear bucket S3 si no existe" para que el pipeline
+# sea completamente autocontenido y no requiera ningún paso manual previo.
+# =============================================================================
+
+name: Deploy msg-pipeline-processor-sesion-08
+
+on:
+  push:
+    branches:
+      - sesion-08
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Entorno de despliegue'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+          - dev
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  JAVA_VERSION: '17'
+  DISTRIBUTION: 'temurin'
+  SAM_STACK_NAME: 'msg-pipeline-stack-sesion-08'
+
+jobs:
+  deploy:
+    name: Build & Deploy to AWS
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Paso 1: Checkout ────────────────────────────────────────────────────
+      - name: 📥 Checkout del código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Paso 2: Configurar Java 17 ──────────────────────────────────────────
+      - name: ☕ Configurar Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.DISTRIBUTION }}
+          cache: 'gradle'
+
+      # ── Paso 3: Configurar credenciales AWS via OIDC ────────────────────────
+      - name: 🔐 Configurar credenciales AWS (OIDC - Sin Access Keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-duration-seconds: 3600
+          role-session-name: GitHubActions-msg-pipeline-sesion-08
+
+      # ── Paso 4: Verificar conexión con AWS ──────────────────────────────────
+      - name: 🔍 Verificar identidad AWS
+        run: aws sts get-caller-identity
+
+      # ── Paso 5: Crear bucket S3 si no existe ────────────────────────────────
+      # CONCEPTO: SAM necesita un bucket S3 para subir los artefactos compilados
+      # (el ZIP de Lambda y el template procesado) ANTES de crear el stack de
+      # CloudFormation. SAM no crea el bucket automáticamente — si no existe,
+      # falla con "S3 Bucket does not exist".
+      #
+      # SOLUCIÓN AUTOCONTENIDA: Este paso verifica si el bucket existe usando
+      # "aws s3api head-bucket". Si devuelve error (bucket no existe) → lo crea.
+      # Si ya existe → no hace nada. Esto hace el pipeline idempotente: funciona
+      # tanto en el primer deploy como en todos los siguientes.
+      #
+      # NOTA: head-bucket falla con error si el bucket no existe → el "|| " captura
+      # ese error y ejecuta el comando de creación.
+      - name: 🪣 Crear bucket S3 de artefactos si no existe
+        run: |
+          BUCKET="${{ secrets.SAM_BUCKET }}"
+          REGION="${{ secrets.AWS_REGION }}"
+
+          echo "Verificando si existe el bucket: $BUCKET"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "✅ El bucket ya existe — no se requiere creación"
+          else
+            echo "🔧 Bucket no encontrado — creando $BUCKET en $REGION..."
+            aws s3 mb "s3://$BUCKET" --region "$REGION"
+
+            # Bloquear acceso público por seguridad (buena práctica)
+            aws s3api put-public-access-block \
+              --bucket "$BUCKET" \
+              --public-access-block-configuration \
+                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+            echo "✅ Bucket $BUCKET creado y asegurado correctamente"
+          fi
+
+      # ── Paso 6: Permisos de ejecución para gradlew ──────────────────────────
+      - name: 🔑 Dar permisos de ejecución a gradlew
+        run: chmod +x gradlew
+
+      # ── Paso 7: Compilar y generar artefacto ZIP ────────────────────────────
+      - name: 🏗️ Compilar con Gradle y generar ZIP Lambda
+        run: ./gradlew clean buildZip --no-daemon --stacktrace
+
+      # ── Paso 8: Verificar artefacto generado ────────────────────────────────
+      - name: 📦 Verificar artefacto ZIP
+        run: |
+          ls -lh build/distributions/
+          if [ ! -f "build/distributions/msg-pipeline-processor-lambda.zip" ]; then
+            echo "❌ ERROR: El ZIP de Lambda no fue generado"
+            exit 1
+          fi
+          echo "✅ ZIP generado correctamente"
+          unzip -l build/distributions/msg-pipeline-processor-lambda.zip | head -20
+
+      # ── Paso 9: Instalar AWS SAM CLI ────────────────────────────────────────
+      - name: 📦 Instalar AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # ── Paso 10: Verificar SAM CLI ───────────────────────────────────────────
+      - name: 🔍 Verificar versión de SAM CLI
+        run: sam --version
+
+      # ── Paso 11: sam build ──────────────────────────────────────────────────
+      - name: 🔨 SAM Build
+        run: sam build --template template.yaml
+
+      # ── Paso 12: Limpiar stack en ROLLBACK_COMPLETE ─────────────────────────
+      # Si un deploy anterior falló, CloudFormation deja el stack en
+      # ROLLBACK_COMPLETE. Ese estado no admite updates → hay que eliminarlo.
+      - name: 🧹 Limpiar stack en ROLLBACK_COMPLETE (si aplica)
+        run: |
+          echo "Consultando estado del stack: ${{ env.SAM_STACK_NAME }}"
+
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "NO_EXISTE")
+
+          echo "Estado actual del stack: $STACK_STATUS"
+
+          if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "⚠️  Stack en ROLLBACK_COMPLETE — eliminando..."
+            aws cloudformation delete-stack --stack-name ${{ env.SAM_STACK_NAME }}
+            aws cloudformation wait stack-delete-complete --stack-name ${{ env.SAM_STACK_NAME }}
+            echo "✅ Stack eliminado. sam deploy creará uno nuevo."
+          elif [ "$STACK_STATUS" = "NO_EXISTE" ]; then
+            echo "ℹ️  Stack no existe — sam deploy lo creará desde cero."
+          else
+            echo "✅ Stack en estado '$STACK_STATUS' — sin limpieza necesaria."
+          fi
+
+      # ── Paso 13: sam deploy ──────────────────────────────────────────────────
+      - name: 🚀 SAM Deploy
+        run: |
+          sam deploy \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --s3-bucket ${{ secrets.SAM_BUCKET }} \
+            --s3-prefix sesion-08 \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "Environment=prod" \
+              "ArtifactsBucketName=${{ secrets.SAM_BUCKET }}" \
+            --tags \
+              "Proyecto=msg-pipeline" \
+              "Sesion=08" \
+              "Curso=SpringBoot-AWS-Serverless" \
+              "ManagedBy=GitHubActions"
+
+      # ── Paso 14: Mostrar los Outputs del stack ───────────────────────────────
+      - name: 📋 Mostrar Outputs del Stack
+        run: |
+          echo "=== Outputs del Stack CloudFormation ==="
+          aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --query "Stacks[0].Outputs" \
+            --output table
+
+      # ── Paso 15: Notificación de éxito ────────────────────────────────────────
+      - name: ✅ Despliegue exitoso
+        run: |
+          echo "🎉 Despliegue de msg-pipeline-processor-sesion-08 completado"
+          echo "📅 Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "🌿 Branch: ${{ github.ref_name }}"
+          echo "📝 Commit: ${{ github.sha }}"
